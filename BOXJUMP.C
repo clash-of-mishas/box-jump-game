@@ -1,984 +1,286 @@
-// TODO, in order from most important
-// - allow for one more sine step in the jump, rotate and screen shake
-// - make sure this game is stable and runs exactly the same on all
-// platforms
-// - add different platform levels (colour changeable)
-// - camera will pan up/down according to the platform level
-// - add "fall" rotation, for when box falls from a platform (M_PI_2)
-// - add a config.txt file, and store user adjustable variables in them
-// - add more user adjustable variables, eg box, bg, spike, platform colour
-// - draw eyes and mouth on box (colour changeable)
-// - add "bubble" double jump
-// - soundsssss!!!
+// TODO
+// - use frame delta to cap game speed
+// - change jump speed from pixels to seconds
+// - add option to show fps ingame
+// - change jump from linear to sine
 
-// Box Jump Game, written by Misha Soup
+// for window creation, rendering etc
+#include <SDL2/SDL.h>
+// required to add images
+#include <SDL2/SDL_image.h>
 
-// compile with djgpp, liballegro and libmath
+// the width and height of the window is not const, because they can change on
+// android
+int window_width = 1920;
+int window_height = 1080;
 
-// NOTE - this game assumes that the compiler runs in 32-bit protected mode
-// Yes, I know that it's weird that the whole game is condensed to a single
-// file. That's just my coding style. Get used to it.
-// Optimised to run as fast as possible, to the extent of my coding skills:)
-// Each line has a maximum width of 76, to fit in DOS's default 80-column 
-// mode with some padding for window borders
-// Designed on and for a Fujitsu ESPRIMO U9200 with Intel Core 2 Duo T5750
-// @ 2.0GHz running FreeDOS, however this game should work on any 386 or
-// better CPU with a minimum of 4MB RAM, you probably will need to tinker
-// with the #define variables below to achieve a smooth performance.
+SDL_Window* game_window;
+SDL_Renderer* game_renderer;
 
-// only uses four libraries :)
-#include <allegro.h>
-#include <math.h>
-#include <stdlib.h>
-#include <time.h>
+// conatant values, try changing them and seeing the results!
+const int max_jump_height = 300;
+const double jump_speed = 0.5; // length in seconds it takes to complete a jump
+const double max_rotate = 180.0;
 
-// below are variables that are user adjustable
-// try changing them and seeing the results!
-#define box_size (75.0) // box size in pixels
-#define max_rotate (M_PI) // maximum degree of rotation per jump(in radians)
-#define max_jump_height (150.0) // jump height in pixels
-#define jump_speed (0.5) // how many seconds it takes to complete a jump
-#define tick_frequency (1000) // number of ticks per second
-#define screen_width (800) // screen width in pixels
-#define screen_height (600) // screen height in pixels
-#define screen_bits (8) // bits per pixel
-#define show_fps (1) // show fps. 0 = false, 1 = true
-#define vsync_on (0) // turn on vsync. 0 = false, 1 = true
-#define box_speed (750.0) // how fast the box moves, this affects obstacles
-#define obstacle_size (50.0) // width of spikes, platforms and bubbles
-#define platform_height (50.0) //height of platforms
-#define platform_distance (100.0) // the y distance between platforms
-#define shake_screen_freq (10) // shake screen frequency
-#define screen_shake_speed (0.5) // how many seconds to shake screen for
-#define screen_shake_mag (50.0) // strength of shake
-#define lock_fps (0) // lock fps to variable below
-#define fps (60.0) // maximum fps to render at if lock_fps == 1
+int is_running;
+int is_jumping;
+int is_falling;
+int box_rest_y;
+double box_x;
+double box_y;
+double rotate_step;
+int heldDown;
 
-// the variables below are used internally
-// DO NOT MODIFY OR THE GAME MIGHT CRASH!
-double box_vertices[8];
-int box_vertices_int[8];
-int is_jumping = 0;
-double frame_delta = 0.0;
-volatile int tick_count = 0;
-double last_jump_step = 0.0;
-double jump_count = 0.0;
-double curr_rotate = 0.0;
-double box_center_x;
-double box_center_y;
-double box_min_x, box_min_y;
-double box_max_x, box_max_y;
-double* obstacles;
-int* obstacle_type;
-int max_obstacles;
-int next_obstacle = 0;
-int last_obstacle = 0;
-int obstacle_count = 0;
-BITMAP* buffer;
-double curr_fps = 0.0;
-int frame_count = 0;
-int last_tick = 0;
-int is_dropping = 0;
-int curr_platform = 0;
-int next_platform = 0;
-int is_running = 1;
-int is_paused = 0;
-int cam_is_moving = 0;
-const double half_obst_size = (obstacle_size / 2.0);
-int is_collided = 0;
-int is_shaking = 0;
-int do_reset_game = 0;
-double last_shake_step = 0.0;
-double screen_shake_count = 0.0;
-const double max_delta_frame = (1.0 / fps);
-volatile int lock_fps_tick = 0;
+double frame_delta;
+const int vsync_on = 1;
 
-// allegro timer interurpt
-static inline void tick_interrupt(void)
+const char* box_img_path = "images/box.png";
+SDL_Texture* box_img;
+SDL_Rect box_rect;
+
+const char* background_img_path = "images/background.png";
+SDL_Texture* background_img;
+
+// initialise game variables
+static inline void reset_game(void)
 {
-    tick_count++;
+	is_running = 1;
+	is_jumping = 0;
+	is_falling = 0;
 	
-    return;
-}
-END_OF_FUNCTION(tick_interrupt);
-
-// if lock_fps is 1, then we wait until this interrupt is called before
-// drawing next frame
-static inline void lock_fps_interrupt(void)
-{
-    lock_fps_tick = 1;
-
-    return;
-}
-END_OF_FUNCTION(lock_fps_interrupt);
-
-// default starting position
-static inline void reset_box(void)
-{
-    box_vertices[0] = (double)(screen_width / 4) - (box_size / 2.0);
-    box_vertices[1] = (double)(screen_height / 2) - (box_size / 2.0);
-    box_vertices[2] = (double)(screen_width / 4) - (box_size / 2.0);
-    box_vertices[3] = (double)(screen_height / 2) + (box_size / 2.0);
-    box_vertices[4] = (double)(screen_width / 4) + (box_size / 2.0);
-    box_vertices[5] = (double)(screen_height / 2) + (box_size / 2.0);
-    box_vertices[6] = (double)(screen_width / 4) + (box_size / 2.0);
-    box_vertices[7] = (double)(screen_height / 2) - (box_size / 2.0);
+	box_rect.w = window_width / 10;
+	box_rect.h = window_width / 10;
+	box_rect.x = (window_width / 2) - (box_rect.w / 2);
+	box_rect.y = (window_height / 2) - (box_rect.w / 2);
 	
-	box_min_x = box_vertices[0];
-	box_min_y = box_vertices[1];
-	box_max_x = box_vertices[4]; 
-	box_max_y = box_vertices[5];
+	box_x = (double)box_rect.x;
+	box_y = (double)box_rect.y;
 	
-	box_center_x = box_min_x + ((box_max_x - box_min_x) / 2.0);
-    box_center_y = box_min_y + ((box_max_y - box_min_y) / 2.0);
+	box_rest_y = box_rect.y;
 	
-    return;
-}
-
-// rotates the box back to 0 around its center
-static inline void reset_box_rotation(void)
-{
-    box_vertices[0] = box_center_x - (box_size / 2.0);
-    box_vertices[1] = box_center_y - (box_size / 2.0);
-    box_vertices[2] = box_center_x + (box_size / 2.0);
-    box_vertices[3] = box_center_y - (box_size / 2.0);
-    box_vertices[4] = box_center_x + (box_size / 2.0);
-    box_vertices[5] = box_center_y + (box_size / 2.0);
-    box_vertices[6] = box_center_x - (box_size / 2.0);
-    box_vertices[7] = box_center_y + (box_size / 2.0);
-
-    return;
-}
-
-// returns the minimum or maximum x or y vertice
-static inline double get_vertice(int x_or_y, int min_or_max)
-{
-    double result = box_vertices[x_or_y];
-
-    int i;
-
-    for(i = (x_or_y + 2); i < 8; i += 2)
-    {
-		if(!min_or_max)
-		{
-			if(box_vertices[i] < result)
-			{
-				result = box_vertices[i];
-			}
-		}
-
-		else
-		{
-			if(box_vertices[i] > result)
-			{
-				result = box_vertices[i];
-			}
-		}
-    }
-
-    return result;
-}
-
-// rotate box 
-static inline void rotate_box(void)
-{
-    // reset the box's rotation to 0 before applying curr_rotate
-    reset_box_rotation();
-
-    double c = cos(curr_rotate);
-    double s = sin(curr_rotate);
-    double box_x, box_y;
-    int i;
-
-    for(i = 0; i < 8; i+= 2)
-    {
-		box_x = box_vertices[i];
-		box_y = box_vertices[i + 1];
-
-		box_vertices[i] = box_center_x + (c * (box_x - box_center_x)) -
-			(s * (box_y - box_center_y));
-
-		box_vertices[i + 1] = box_center_y + (s * (box_x - box_center_x)) +
-			(c * (box_y - box_center_y)); 
-    }
-
-    return;
-}
-
-static inline void jump(void)
-{
-    double next_sine_step = 0.0;
-
-    // get maximum x and y vertices
-    box_min_x = get_vertice(0, 0);
-    box_min_y = get_vertice(1, 0);
-    box_max_x = get_vertice(0, 1);
-    box_max_y = get_vertice(1, 1);
-
-    // find center of box
-    box_center_x = box_min_x + ((box_max_x - box_min_x) / 2.0);
-    box_center_y = box_min_y + ((box_max_y - box_min_y) / 2.0);
-
-    // increment total rotation by the frame delta
-    curr_rotate += (max_rotate * frame_delta) / jump_speed;
-
-    rotate_box();
+	rotate_step = 0.0;
 	
-	// update delta counter
-    jump_count += frame_delta;
+	heldDown = 0;
+	
+	return;
+}
 
-    // change box's y coords according to the sine wave
-    next_sine_step = sinf((jump_count * M_PI) / jump_speed) * 
-		max_jump_height;
-
-    int i;
-
-    for(i = 1; i < 8; i+= 2)
-    {
-		box_vertices[i] -= (next_sine_step - last_jump_step);
-    }
-
-    // save last sine step to be used for the next loop plus frame delta
-    last_jump_step = next_sine_step;
-
-    // check if we have jumped for jump_speed seconds
-    if(curr_rotate > max_rotate)
+// init window and renderer
+static inline int init_game(void)
+{
+	// init all of SDL services
+	if(SDL_Init(SDL_INIT_EVERYTHING) != 0)
 	{
-		is_jumping = 0;
-		jump_count = 0.0;
-		last_jump_step = 0.0;
-		curr_rotate = 0.0;
-		reset_box();
-    }
-
-    return;
-}
-
-// required to draw a polygon with allegro
-static inline void cast_to_int(void)
-{
-    int i;
-
-    for(i = 0; i < 8; i++)
-    {
-		box_vertices_int[i] = (int)(box_vertices[i]);
-    }
-
-    return;
-}
-
-// appends a spike to the spikes* array
-static inline void add_spike(void)
-{
-    obstacles[next_obstacle] = (double)screen_width + half_obst_size;
-    // will be modified when we add platforms
-    obstacles[next_obstacle + 1] = (double)(screen_height / 2) + 
-		(box_size / 2.0) - (next_platform * platform_distance);
-	
-    obstacle_type[next_obstacle / 2] = 1;
-	
-    // loop back to 0 if we have reached the end of the array
-    if((next_obstacle + 2) == max_obstacles)
-    {
-		next_obstacle = 0;
-    }
-
-    else
-    {
-		next_obstacle += 2;
-    }
-
-    return;
-}
-
-// set up all global variables for the game
-static inline void init_game(void)
-{
-	// if unable to initialize allegro or graphics, abort
-    if(allegro_init() != 0)
-	{
-		abort();
+		return 1; // error
 	}
 	
-	set_color_depth(screen_bits);
+	// init window
+	game_window = SDL_CreateWindow("Box Jump Game", SDL_WINDOWPOS_CENTERED,
+		SDL_WINDOWPOS_CENTERED, window_width, window_height,
+		SDL_WINDOW_FULLSCREEN);
 	
-	if(set_gfx_mode(GFX_AUTODETECT, screen_width, screen_height, 0, 0) != 0)
+	// window creation failed
+	if(game_window == 0)
 	{
-		abort();
+		return 1;
 	}
-    
-	install_keyboard();
-	install_timer();
-
-    buffer = create_bitmap(SCREEN_W, SCREEN_H);
-
-    LOCK_VARIABLE(tick_count);
-    LOCK_FUNCTION(tick_interrupt);
-
-    install_int_ex(tick_interrupt, BPS_TO_TIMER(tick_frequency));
 	
+	// update the window width and height with the actual values,
+	// because on android it's subject to change
+	SDL_GetWindowSize(game_window, &window_width, &window_height);
 	
-    LOCK_VARIABLE(lock_fps_tick);
-    LOCK_FUNCTION(lock_fps_interrupt);
-
-    // if lock_fps = 1, set this interrupt
-	if(lock_fps)
+	if(vsync_on)
 	{
-		install_int_ex(lock_fps_interrupt, BPS_TO_TIMER((int)fps));
+		// init renderer
+		game_renderer = SDL_CreateRenderer(game_window, -1,
+			SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 	}
-
-    srand(time(0));
 	
-	reset_box();
-
-    // allocate memory for spikes
-    // maximum amount of spikes = screen_width / spike_size
-    max_obstacles = (screen_width / (int)obstacle_size) * 2;
-    obstacles = malloc(sizeof(double) * max_obstacles);
-    obstacle_type = malloc(max_obstacles / 2);
-	
-    return;
-}
-
-// move all spikes
-static inline void update_obstacles(void)
-{
-    int i = 0;
-
-    for(i = last_obstacle; i != next_obstacle; i += 2)
-    {
-		// last spike is invisible, so we 'delete' it from the array
-		if(obstacles[i] < -half_obst_size)
-		{
-			if((last_obstacle + 2) == max_obstacles)
-			{
-				last_obstacle = 0;
-				obstacle_count--;
-			}
-
-			else
-			{
-				last_obstacle += 2;
-				obstacle_count--;
-			}
-		}
-
-		// move the spike
-		else
-		{
-			obstacles[i] -= frame_delta * box_speed;
-		}
-
-		if((i + 2) == max_obstacles)
-		{
-			i = -2;
-		}
-    }
-
-    return;
-}
-
-static inline void drop(void)
-{
-    // to be added after we add platforms
-
-    return;
-}
-
-// add platform above or below the cube
-static inline void add_platform(int up_down)
-{
-	if(up_down == 1)
-	{
-		next_platform++;
-	}
 	else
 	{
-		next_platform--;
+		// init renderer
+		game_renderer = SDL_CreateRenderer(game_window, -1,
+			SDL_RENDERER_ACCELERATED);
 	}
 	
-	obstacles[next_obstacle] = (double)screen_width + half_obst_size;
+	// renderer creation failed
+	if(game_renderer == 0)
+	{
+		return 1;
+	}
 	
-	obstacles[next_obstacle + 1] = (double)(screen_height / 2) +
-		(box_size / 2.0) - (next_platform * platform_distance);
+	// hide mouse cursor
+	SDL_ShowCursor(SDL_DISABLE);
 	
-    obstacle_type[next_obstacle / 2] = 2;
+	reset_game();
 	
-    // loop back to 0 if we have reached the end of the array
-    if((next_obstacle + 2) == max_obstacles)
-    {
-		next_obstacle = 0;
-    }
-
-    else
-    {
-		next_obstacle += 2;
-    }
+	frame_delta = 0.0;
 	
-    return;
+	return 0;
 }
 
-// move all obstacles - spikes, platforms, double jump bubbles etc
+// load all the images
+static inline int load_imgs(void)
+{
+	box_img = IMG_LoadTexture(game_renderer, box_img_path);
+	
+	// image load failed
+	if(box_img == 0)
+	{
+		return 1;
+	}
+	
+	background_img = IMG_LoadTexture(game_renderer, background_img_path);
+	
+	// image load failed
+	if(background_img == 0)
+	{
+		return 1;
+	}
+	
+	return 0;
+}
+
+// update game
 static inline void update_game(void)
 {
-	int newest_obstacle = -1;
-	int can_add_obstacle = 0;
-	
-    // update box vectors if jumping or dropping
-    if(is_jumping)
-    {
-		jump();
-    }
-
-    else if(is_dropping)
-    {
-		drop();
-    }
-	
-	// if there are no obstacles, all is good to add
-	if(obstacle_count == 0)
+	if(is_jumping)
 	{
-		can_add_obstacle = 1;
-	}
-	
-	// need to check whether to loop around the obstacles array
-	else if(next_obstacle == 0)
-	{
-		newest_obstacle = max_obstacles - 2;
-	}
-	
-	else
-	{
-		newest_obstacle = next_obstacle - 2;
-	}
-	
-	
-	if(newest_obstacle > -1)
-	{
-		// check if the most recently added obstacle has enough space for
-		// box to land, to be updated
-		if(obstacles[newest_obstacle] < (screen_width -
-			half_obst_size - (box_size * 4.5)))
+		box_y -= (((double)max_jump_height * frame_delta) / jump_speed) * 2.0;
+		rotate_step += ((max_rotate * frame_delta) / jump_speed);
+		
+		if(box_y < (box_rest_y - max_jump_height))
 		{
-			can_add_obstacle = 1;
+			box_y = (box_rest_y - max_jump_height);
+			is_jumping = 0;
+			is_falling = 1;
 		}
 	}
 	
-	if(can_add_obstacle)
-	{		
-		// check if we need to add obstacles
-		switch(rand() % 4)
+	else if(is_falling)
+	{
+		box_y += (((double)max_jump_height * frame_delta) / jump_speed) * 2.0;
+		rotate_step += ((max_rotate * frame_delta) / jump_speed);
+		
+		if(box_y > box_rest_y)
 		{
-			case 1:
-				add_spike();
-				obstacle_count++;
+			box_y = box_rest_y;
+			is_falling = 0;
+			// reset the rotation to default
+			rotate_step = 0.0;
+		}
+	}
+	
+	return;
+}
+
+// game loop
+static inline void run_game(void)
+{
+	double tick_speed = (double)SDL_GetPerformanceFrequency();
+	Uint64 start_frame_tick, end_frame_tick;
+	
+	while(is_running)
+    {
+    	// get tick at start of frame
+    	start_frame_tick = SDL_GetPerformanceCounter();
+    	
+    	// poll for events
+    	SDL_Event e;
+		if(SDL_PollEvent(&e))
+		{
+			if(e.type == SDL_QUIT)
+			{
 				break;
-
-			case 2:
-				add_platform(1);
-				obstacle_count++;
+			}
+			
+			else if(e.type == SDL_KEYUP && e.key.keysym.sym == SDLK_ESCAPE)
+			{
 				break;
-
-			case 3:
-				if(curr_platform > 0)
+			}
+			
+			else if(e.key.keysym.sym == SDLK_SPACE)
+			{
+				if(e.type == SDL_KEYDOWN)
 				{
-					add_platform(0);
-					obstacle_count++;
-				}
-		}
-	}
-	
-    update_obstacles();
-	
-    return;
-}
-
-static inline void draw_spikes(void)
-{
-    int spike_vertices[6];
-
-    int i;
-
-    // draw each spike
-    for(i = last_obstacle; i != next_obstacle; i += 2)
-    {
-		if(obstacle_type[i / 2] != 1)
-		{
-			continue;
-		}
-
-		spike_vertices[0] = (int)(obstacles[i] - half_obst_size);
-		spike_vertices[1] = (int)(obstacles[i + 1]);
-		spike_vertices[2] = (int)(obstacles[i]);
-		spike_vertices[3] = (int)(obstacles[i + 1] - (obstacle_size));
-		spike_vertices[4] = (int)(obstacles[i] + half_obst_size);
-		spike_vertices[5] = (int)(obstacles[i + 1]);
-
-		polygon(buffer, 3, spike_vertices, makecol(0xFF, 0x00, 0x00));
-		
-		// loop back to start of array
-		if((i + 2) == max_obstacles)
-		{
-			i = -2;
-		}
-    }
-
-    return;
-}
-
-static inline void draw_platforms(void)
-{
-    int platform_vertices[8];
-
-    int i;
-
-    // draw each spike
-    for(i = 0; i < max_obstacles; i += 2)
-    {
-		if(obstacle_type[i / 2] != 2)
-		{
-			continue;
-		}
-
-		platform_vertices[0] = (int)(obstacles[i] - half_obst_size);
-		platform_vertices[1] = (int)(obstacles[i + 1]);
-		platform_vertices[2] = (int)(obstacles[i]);
-		platform_vertices[3] = (int)(obstacles[i + 1] - (obstacle_size));
-		platform_vertices[4] = (int)(obstacles[i] + half_obst_size);
-		platform_vertices[5] = (int)(obstacles[i + 1]);
-
-		polygon(buffer, 4, platform_vertices, makecol(0xFF, 0x00, 0x00));
-		
-		// loop back to start of array
-		if((i + 2) == max_obstacles)
-		{
-			i = -2;
-		}
-    }
-
-    return;
-}
-
-// draw everything to buffer
-static inline void draw(void)
-{
-    clear_to_color(buffer, makecol(0x00, 0x00, 0xFF));
-
-    draw_spikes();
-    draw_platforms();
-
-    cast_to_int();
-    polygon(buffer, 4, box_vertices_int, makecol(0x00, 0xFF, 0x00));
-
-    if(show_fps)
-    {
-		textprintf_ex(buffer, font, 0, 0, makecol(0, 0, 0), -1, 
-			"FPS - %.5f", curr_fps);
-	}
-
-    return;
-}
-
-// calculate fps
-static inline void calc_fps(void)
-{
-    curr_fps = (((double)tick_frequency) * ((double)frame_count)) / 
-		((double)tick_count);
-
-    frame_delta = (double)(tick_count - last_tick) / (double)tick_frequency;
-
-    if(tick_count > tick_frequency)
-    {
-		frame_count = 0;
-		tick_count = 0;
-    }
-
-    last_tick = tick_count;
-
-    return;
-}
-
-// check if point is on line segment
-static inline int on_line_segment(double line_x1, double line_y1,
-	double line_x2, double line_y2, double point_x, double point_y)
-{
-	double max_1 = (line_x1 > point_x) ? line_x1 : point_x;
-	double min_1 = (line_x1 < point_x) ? line_x1 : point_x;
-	double max_2 = (line_y1 > point_y) ? line_y1 : point_y;
-	double min_2 = (line_y1 < point_y) ? line_y1 : point_y;
-	
-	if(line_x2 <= max_1 && line_x2 >= min_1 && line_y2 <= max_2 && 
-		line_y2 >= min_2)
-	{
-		return 1;
-	}
-	
-    return 0;
-}
-
-// find orientation of lines
-static inline int line_orient(double x1, double y1, double x2, double y2,
-	double x3, double y3) 
-{
-    int val = (int)((y2 - y1) * (x3 - x2) - (x2 - x1) * (y3 - y2));
-	
-    if (val == 0) return 0;
-	
-    return (val > 0) ? 1 : 2;
-}
-
-// check if two line segments intersect
-static inline int line_intersect(double line_1_x1, double line_1_y1,
-	double line_1_x2, double line_1_y2, double line_2_x1, double line_2_y1, 
-	double line_2_x2, double line_2_y2) 
-{
-    int orient_1 = line_orient(line_1_x1, line_1_y1, line_1_x2, line_1_y2,
-		line_2_x1, line_2_y1);
-	
-    int orient_2 = line_orient(line_1_x1, line_1_y1, line_1_x2, line_1_y2,
-		line_2_x2, line_2_y2);
-	
-    int orient_3 = line_orient(line_2_x1, line_2_y1, line_2_x2, line_2_y2,
-		line_1_x1, line_1_y1);
-	
-    int orient_4 = line_orient(line_2_x1, line_2_y1, line_2_x2, line_2_y2,
-		line_1_x2, line_1_y2);
-	
-    if (orient_1 != orient_2 && orient_3 != orient_4)
-	{
-		return 1;
-	}
-	
-	if (orient_1 == 0 && on_line_segment(line_1_x1, line_1_y1, line_2_x1,
-		line_2_y1, line_1_x2, line_1_y2))
-	{
-		return 1;
-	}
-	
-	if (orient_2 == 0 && on_line_segment(line_1_x1, line_1_y1, line_2_x2,
-		line_2_y2, line_1_x2, line_1_y2))
-	{
-		return 1;
-	}
-	
-	if (orient_3 == 0 && on_line_segment(line_2_x1, line_2_y1, line_1_x1,
-		line_1_y1, line_2_x2, line_2_y2))
-	{
-		return 1;
-	}
-	
-	if (orient_4 == 0 && on_line_segment(line_2_x1, line_2_y1, line_1_x2,
-		line_1_y2, line_2_x2, line_2_y2))
-	{
-		return 1;
-	}
-  
-    return 0;
-}
-
-// all function definitions were stolen (and modified) from
-// https://www.geeksforgeeks.org/check-if-two-given-line-segments-intersect/
-// check if box is touching spike using line intersection testing
-static inline int box_touch_spike(int close_spike)
-{
-	int i;
-	
-	for(i = 0; i < 8; i += 2)
-	{
-		// check if any of the box's edges are intersecting with the spike
-		// need to check two lines of the spike triangle
-		// (bottom one doesn't matter)
-		if(line_intersect(box_vertices[i], box_vertices[i + 1], 
-			box_vertices[((i + 2) % 8)], box_vertices[((i + 3) % 8)],
-			(obstacles[close_spike] - half_obst_size),
-			obstacles[close_spike + 1], obstacles[close_spike],
-			(obstacles[close_spike + 1] - obstacle_size)))
-		{
-			return 1;
-		}
-		
-		if(line_intersect(box_vertices[i], box_vertices[i + 1], 
-			box_vertices[((i + 2) % 8)], box_vertices[((i + 3) % 8)],
-			(obstacles[close_spike] + half_obst_size),
-			obstacles[close_spike + 1], obstacles[close_spike],
-			(obstacles[close_spike + 1] - obstacle_size)))
-		{
-			return 1;
-		}
-	}
-	
-    return 0;
-}
-
-// box-objects collision detection
-static inline void detect_collision(void)
-{
-	int i;
-	int is_close = 0;
-	
-	double min_obst_x, max_obst_x, min_obst_y;
-	
-	for(i = last_obstacle; i != next_obstacle; i += 2)
-	{
-		if(obstacle_type[i / 2] == 1)
-		{
-			min_obst_x = obstacles[i] - half_obst_size;
-			max_obst_x = obstacles[i] + half_obst_size;
-			min_obst_y = obstacles[i + 1] - obstacle_size;
-			
-			// use a fast detection before we get to the actual heavy
-			// traingle collision detection
-			if(min_obst_x > box_max_x)
-			{
-				is_close = 0;
-			}
-			
-			else if(max_obst_x < box_min_x)
-			{
-				is_close = 0;
-			}
-			
-			else if(min_obst_y > box_max_y)
-			{
-				is_close = 0;
-			}
-			
-			else
-			{
-				is_close = 1;
-			}
-			
-			if(is_close)
-			{
-				if(!is_jumping)
-				{
-					is_collided = 1;
-					is_shaking = 1;
-					break;
+					if(heldDown == 0)
+					{
+						heldDown = 1;
+					}
 				}
 				
-				else
+				if(e.type == SDL_KEYUP)
 				{
-					if(box_touch_spike(i))
+					if(heldDown == 1)
 					{
-						is_collided = 1;
-						is_shaking = 1;
-						break;
+						heldDown = 0;
 					}
 				}
 			}
 		}
 		
-		if((i + 2) == max_obstacles)
+		if(heldDown)
 		{
-			i = -2;
-		}
-	}
-	
-	return;
-}
-
-// check keyboard for input and update global variables accordingly
-static inline void check_keyboard(void)
-{
-	if(keyboard_needs_poll())
-	{
-		poll_keyboard();
-	}
-
-	if(key[KEY_SPACE])
-	{
-		if(!is_jumping)
-		{
-			is_jumping = 1;
-		}
-	}
-
-	if(key[KEY_ESC])
-	{
-		if(!is_paused)
-		{
-			is_paused = 1;
-		}
-	}
-
-	if(key[KEY_ENTER])
-	{
-		if(is_paused)
-		{
-			is_paused = 0;
-		}
-	}
-	
-	if(key[KEY_R])
-	{
-		do_reset_game = 1;
-	}
-
-	if(key[KEY_Q])
-	{
-		is_running = 0;
-	}
-	
-	return;
-}
-
-// shake the screen (ie, move all objects on the screen) using damped 
-// sine wave
-static inline void shake_screen(void)
-{
-	int i;
-	
-	// calculate amplitude damping with exponent
-	float damped_amplitude = screen_shake_mag * exp((-4.0 /
-		screen_shake_speed) * screen_shake_count);
-	
-	// how much to move each vertice
-	double next_x = damped_amplitude * sin(2 * M_PI * shake_screen_freq *
-		screen_shake_count);
-	
-	// keep track of last step and get difference
-	double move_x = next_x - last_shake_step;
-	
-	// now update all obstacles and box
-	for(i = 0; i < 8; i += 2)
-	{
-		box_vertices[i] -= move_x; 
-	}
-	
-	for(i = last_obstacle; i != next_obstacle; i += 2)
-	{
-		obstacles[i] -= move_x;
-		
-		if((i + 2) == max_obstacles)
-		{
-			i = -2;
-		}
-	}
-	
-	screen_shake_count += frame_delta;
-	
-	if(screen_shake_count > screen_shake_speed)
-	{
-		is_shaking = 0;
-	}
-	
-	last_shake_step = next_x;
-	
-	return;
-}
-
-// reset game to beginning
-static inline void reset_game(void)
-{
-	is_jumping = 0;
-	is_dropping = 0;
-	last_jump_step = 0.0;
-	jump_count = 0.0;
-	curr_rotate = 0.0;
-	reset_box();
-	
-	next_obstacle = 0;
-	last_obstacle = 0;
-	obstacle_count = 0;
-	curr_platform = 0;
-	cam_is_moving = 0;
-	
-	is_collided = 0;
-	is_paused = 0;
-	do_reset_game = 0;
-	
-	is_shaking = 0;
-	last_shake_step = 0.0;
-	screen_shake_count = 0.0;
-	
-	return;
-}
-
-// game loop function
-static inline void run_game(void)
-{
-    while(is_running)
-    {
-		// first, check for keyboard input
-		check_keyboard();
-		
-		if(do_reset_game)
-		{
-			reset_game();
-		}
-		
-		if(is_paused)
-		{
-			// to do: draw pause menu and options
-		}
-		
-		// if collided, then only shake screen, stop updating the game
-		// to reset the game, press 'r'
-		else if(is_collided)
-		{
-			if(is_shaking)
+			if(is_jumping == 0 && is_falling == 0)
 			{
-				shake_screen();
+				is_jumping = 1;
 			}
 		}
 		
-		// game is running normally
-		else
-		{	
-			// move box and everything else
-			update_game();
-			
-			// detect for collision
-			detect_collision();
-		}
+		// update game
+		update_game();
 		
-		// draw everything to buffer
-		draw();
+		// clear screen
+		SDL_RenderClear(game_renderer);
 		
-		// wait for vsync if needed
-		if(vsync_on)
-		{
-			vsync();
-		}
-
-		// write buffer to video memory
-		blit(buffer, screen, 0, 0, 0, 0, SCREEN_W, SCREEN_H);
+		// draw background
+		SDL_RenderCopy(game_renderer, background_img, 0, 0);
 		
-		// not sure whether to move this to before or after vsync()??
-		// lock frame rate by checking tick_count against tick_frequency
-		if(lock_fps)
-		{
-			// wait for lock_fps_tick to become 1
-			while(!lock_fps_tick){}
-			lock_fps_tick = 0;
-		}
+		// need to cast double to int for SDL to be able to draw it
+		box_rect.x = (int)box_x;
+		box_rect.y = (int)box_y;
 		
-		// update fps counter
-		frame_count++;
-
-		// calculate the frame per second and delta
-		calc_fps();
+		// copy box onto backbuffer
+		SDL_RenderCopyEx(game_renderer, box_img, 0, &box_rect, rotate_step, 0, 0);
+		
+		// switch backbuffer to front
+		SDL_RenderPresent(game_renderer);
+		
+		// get end frame tick
+		end_frame_tick = SDL_GetPerformanceCounter();
+		frame_delta = ((double)(end_frame_tick) - (double)(start_frame_tick)) / (double)tick_speed;
     }
 }
 
+// free all allocated memory
 static inline void del_game(void)
 {
-	free(obstacles);
-	free(obstacle_type);
+	// will need to delete all images loaded
+	SDL_DestroyTexture(box_img);
+	SDL_DestroyTexture(background_img);
 	
-	allegro_exit();
+	SDL_DestroyRenderer(game_renderer);
+	SDL_DestroyWindow(game_window);
 	
 	return;
 }
 
-int main(int argc, char** argv)
+int main(void)
 {
-    init_game();
-
-    run_game();
+	// If this function returns 0, all is good, otherwise quit
+	if(init_game() != 0)
+	{
+		return 0;
+	}
+	
+	if(load_imgs() != 0)
+	{
+		return 0;
+	}
+	
+	run_game();
 	
 	del_game();
-
-    return 0;
+	
+	return 0;
 }
